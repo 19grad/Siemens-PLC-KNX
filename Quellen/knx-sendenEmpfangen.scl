@@ -1,0 +1,1015 @@
+﻿TYPE "KNX_Empf_Dat"
+VERSION : 0.1
+   STRUCT
+      GruppenAddr : Word;
+      Laenge : Byte;
+      NPDU_ABCI : Byte;
+      Daten : Array[1..20] of Byte;
+   END_STRUCT;
+
+END_TYPE
+
+TYPE "KNX_Send_Dat"
+VERSION : 0.1
+   STRUCT
+      GruppenAddr : Word;
+      Laenge : Byte;
+      NPDU_ABCI : Byte;
+      Daten : Array[1..20] of Byte;
+   END_STRUCT;
+
+END_TYPE
+
+TYPE "KNX_DPT3"
+VERSION : 0.1
+   STRUCT
+      Down_Increase : Bool;   // 0 = Up, Decrease / 1 = Down, Increase
+      prozent : USInt;   // 1, 3, 6, 12, 25, 50, 100% / 0 = Stopp
+   END_STRUCT;
+
+END_TYPE
+
+TYPE "KNX_Data_Exchange"
+VERSION : 0.1
+   STRUCT
+      Empf_Dat { S7_SetPoint := 'False'} : "KNX_Empf_Dat";
+      Send_Dat { S7_SetPoint := 'False'} : "KNX_Send_Dat";
+      Senden : Bool;
+      Empfangen : Bool;
+   END_STRUCT;
+
+END_TYPE
+
+FUNCTION "knx-GAnr-to-GAword" : Word
+{ S7_Optimized_Access := 'TRUE' }
+VERSION : 0.1
+   VAR_INPUT 
+      haupt : UInt;   // Hauptgruppe = 0..31
+      mittel : UInt;   // Mittelgruppe = 0..7
+      unter : UInt;   // Untergruppe = 0..255
+   END_VAR
+
+   VAR_TEMP 
+      GruppenAddr : Word;
+   END_VAR
+
+
+BEGIN
+	
+	(*
+	
+	Erstellt eine Dreistufige KNX GA (Word) aus den Bestandteilen (Haupt-, Mittel-, Untergruppe)
+	
+	Quelle:
+	Aus "KNX_GruppeAddr" entnommen
+	
+	*)
+	
+	
+	//Gruppenadresse zu einem Wort zusammenbauen!
+	#GruppenAddr := SHL(IN := #haupt, N := 11);
+	#GruppenAddr := #GruppenAddr OR SHL(IN := #mittel, N := 8);
+	#GruppenAddr := #GruppenAddr OR #unter;
+	
+	
+	#"knx-GAnr-to-GAword" := #GruppenAddr;
+	
+	
+	
+	
+END_FUNCTION
+
+FUNCTION "knx-real-to-DPT9" : Word
+{ S7_Optimized_Access := 'TRUE' }
+VERSION : 0.1
+   VAR_INPUT 
+      inReal : Real;
+   END_VAR
+
+   VAR_TEMP 
+      tmpExp : Int;
+      tmpDIntValIn : DInt;
+      tmp_dInt : DInt;
+      tmpOut : Int;
+   END_VAR
+
+
+BEGIN
+	
+	(*
+	
+	Wandelt eine Real Zahl in den DPT9.xxx (2 Byte Gleitkommawert)
+	
+	Quelle:
+	https://www.sps-forum.de/threads/knx-kommunkation-%C3%BCber-knxnet-ip-mit-siemens-s7-1500-s7-1200-tia-portal.93641/post-804342
+	
+	Weitere Infos:
+	03_07_02 Datapoint Types v01.08.02 AS.pdf
+	3.10 Datapoint Types “2-Octet Float Value”
+	
+	Range: [-671 088,64 … 670 760,96]
+	
+	
+	03.10.2021 van
+	Baustein erstellt anhand des Code von Oberchefe
+	
+	*)
+	
+	#tmpExp := 0;    (*    Exponent initialisieren    *)
+	
+	#tmpDIntValIn := REAL_TO_DINT(#inReal * 100.0);
+	
+	IF #tmpDIntValIn > 2047  THEN   // OR #tmpDIntValIn < -2048
+	    
+	    WHILE #tmpDIntValIn / (2**#tmpExp) > 2047 DO     //EXPT(2, #tmpExp)
+	        #tmpExp := #tmpExp + 1;
+	    END_WHILE;
+	    
+	ELSIF #tmpDIntValIn < -2048 THEN
+	    
+	    WHILE #tmpDIntValIn / (2**#tmpExp) < -2048 DO    // EXPT(2, #tmpExp)
+	        #tmpExp := #tmpExp + 1;
+	    END_WHILE;
+	    
+	ELSE            (*    Kein Exponent erforderlich    *)
+	    
+	    ;
+	    
+	END_IF;
+	
+	
+	#tmp_dInt := #tmpDIntValIn / REAL_TO_DINT((2**(#tmpExp)));         (*    Mantisse roh   *)  //(EXPT(2, INT_TO_WORD(#tmpExp))
+	
+	#tmp_dInt := WORD_TO_DINT(DINT_TO_WORD(#tmp_dInt) AND 16#7FF);
+	#tmpOut := SHL(IN := #tmpExp, N:=11);                (*    Exponent positionieren        *)
+	
+	
+	IF #tmpDIntValIn < 0 THEN                    (*    negativ?    -> Vorzeichen setzen    *)
+	    #tmpOut := #tmpOut OR 16#8000;
+	END_IF;
+	
+	
+	#"knx-real-to-DPT9":= #tmpOut OR DINT_TO_WORD(#tmp_dInt);
+	
+	
+	
+	
+	
+	
+END_FUNCTION
+
+FUNCTION "knx-DPT9-to-real" : Real
+{ S7_Optimized_Access := 'TRUE' }
+VERSION : 0.1
+   VAR_INPUT 
+      inWord : Word;
+   END_VAR
+
+   VAR_TEMP 
+      tmp_Word1 : Word;
+      tmp_M : DWord;
+      tmp_Dword : DWord;
+      tmp_e2 : UDInt;
+      tmp_Real : Real;
+      tmp_Int : Int;
+      tmpInt_M : Int;
+      tmpInt_E : Int;
+      tmpReal_M : Real;
+      tmpReal_E : Real;
+      tmpReal : Real;
+   END_VAR
+
+
+BEGIN
+	(*
+	
+	Wandelt ein DPT9.xxx (2 Byte Gleitkommawert) in einen Real
+	
+	Weitere Infos:
+	03_07_02 Datapoint Types v01.08.02 AS.pdf
+	3.10 Datapoint Types “2-Octet Float Value”
+	
+	03.10.2021 van
+	Baustein erstellt
+	
+	*)
+	
+	
+	
+	//Ergebnis = (0,01 * M)*2^E   //Siehe PDF 03_07_02 Kap. 3.10)
+	// E = [0 … 15]
+	// M = [-2 048 … 2 047], two’s complement notation
+	
+	(*
+	
+	76543210 76543210
+	MEEEEMMM MMMMMMMM
+	
+	*)
+	
+	#tmp_Word1:= #inWord;
+	
+	// Mantisse
+	#tmpInt_M := WORD_TO_INT(#tmp_Word1 & 16#07ff);
+	#tmpReal_M := INT_TO_REAL(#tmpInt_M);
+	
+	//Negative Mantisse anpassen
+	//Das muss noch irgendwie besser gehen ...
+	IF #tmp_Word1.%X15 THEN
+	    #tmpReal_M := (#tmpReal_M*-1.0) + 2048.0;
+	END_IF;
+	
+	
+	// Exponent
+	// #tmp_Dword := #tmp_Word1 & 16#7800;  //Exponent
+	// #tmp_e2 := SHR(IN := #tmp_Dword, N := 11);
+	
+	#tmp_e2 := SHR(IN := SHL(IN := #tmp_Word1, N := 1), N := 12);
+	
+	#tmpInt_E := UDINT_TO_INT(#tmp_e2);
+	#tmpReal_E := INT_TO_REAL(#tmpInt_E);
+	
+	
+	// FloatValue = (0,01 * M)*2^E 
+	#tmpReal := (0.01 * #tmpReal_M) * (2**#tmpReal_E);
+	
+	
+	//Vorzeichen
+	IF #tmp_Word1.%X15 THEN
+	    #tmpReal := (#tmpReal * -1.0) ;
+	END_IF;
+	
+	
+	#"knx-DPT9-to-real" := #tmpReal;
+	
+	
+	
+	
+	
+	
+	
+	
+	
+	
+	
+END_FUNCTION
+
+FUNCTION "knx-DPT3-to-plc" : "KNX_DPT3"
+{ S7_Optimized_Access := 'TRUE' }
+VERSION : 0.1
+   VAR_INPUT 
+      data : Byte;   // RAW DPT3 Daten
+   END_VAR
+
+   VAR_TEMP 
+      tmpStepCode : USInt;
+   END_VAR
+
+
+BEGIN
+	(*
+	
+	knx-DPT3-to-plc
+	
+	Wandelt den DPT3 Wert vom KNX Bus in einen PLC "KNX_DPT3" Wert
+	
+	DPT 3   4 Bit   0..15     
+	3.yyy = boolesch + vorzeichenloser 3-Bit-Wert, z. B. Auf-/Abdimmen  
+	
+	\The KNX Standard v2.1\The KNX Standard v2.1\03 Volume 3 System Specifications\
+	03_07_02 Datapoint Types v01.08.02 AS.pdf
+	3.3 Datapoint Types B1U3 
+	
+	
+	20.02.2024 van
+	Baustein erstellt
+	
+	*)
+	
+	(*** StepCode ***
+	
+	StepCode The amount of intervals into which the 
+	range of 0 % … 100 % is subdivided, or the 
+	break indication. 
+	
+	- 001b…111b: Step Number of intervals = 2^(stepcode-1) 
+	- 000b: Break 
+	
+	*)
+	
+	
+	// Daten aufbereiten
+	#tmpStepCode.%X0 := #data.%X0;
+	#tmpStepCode.%X1 := #data.%X1;
+	#tmpStepCode.%X2 := #data.%X2;
+	
+	#"knx-DPT3-to-plc".prozent:= FLOOR(100.0 / (2**(#tmpStepCode-1)));
+	
+	
+	(*** c ***
+	
+	3.007 DPT_Control_Dimming 
+	c Increase or decrease the brightness. 
+	0 = Decrease 
+	1 = Increase 
+	
+	3.008 DPT_Control_Blinds 
+	c Move up or down. 
+	0 = Up 
+	1 = Down 
+	
+	*)
+	
+	// Daten aufbereiten
+	#"knx-DPT3-to-plc".Down_Increase := #data.%X3;
+	
+	
+	
+END_FUNCTION
+
+FUNCTION "knx-plc-to-DPT3" : Byte
+{ S7_Optimized_Access := 'TRUE' }
+VERSION : 0.1
+   VAR_INPUT 
+      data : "KNX_DPT3";   // Aufbereitete DPT3 Daten
+   END_VAR
+
+   VAR_TEMP 
+      tmpStepCode : USInt;
+   END_VAR
+
+
+BEGIN
+	(*
+	
+	knx-plc-to-DPT3
+	
+	Wandelt einen PLC "KNX_DPT3" Wert in einen KNX Bus DPT3 Wert 
+	
+	
+	DPT 3   4 Bit   0..15     
+	3.yyy = boolesch + vorzeichenloser 3-Bit-Wert, z. B. Auf-/Abdimmen  
+	
+	\The KNX Standard v2.1\The KNX Standard v2.1\03 Volume 3 System Specifications\
+	03_07_02 Datapoint Types v01.08.02 AS.pdf
+	3.3 Datapoint Types B1U3 
+	
+	
+	21.02.2024 van
+	Baustein erstellt
+	
+	*)
+	
+	(*** StepCode ***
+	
+	StepCode The amount of intervals into which the 
+	range of 0 % … 100 % is subdivided, or the 
+	break indication. 
+	
+	- 001b…111b: Step Number of intervals = 2^(stepcode-1) 
+	- 000b: Break 
+	
+	*)
+	
+	
+	// Daten aufbereiten
+	
+	// 1, 3, 6, 12, 25, 50, 100% / 0 = Stopp
+	
+	CASE #data.prozent OF
+	    1..2:  // 
+	        #tmpStepCode := 7;
+	    3..5:  // 
+	        #tmpStepCode := 6;
+	    6..11:  // 
+	        #tmpStepCode := 5;
+	    12..24:  // 
+	        #tmpStepCode := 4;
+	    25..49:  // 
+	        #tmpStepCode := 3;
+	    50..99:  // 
+	        #tmpStepCode := 2;
+	    100:  // 
+	        #tmpStepCode := 1;
+	    ELSE  // 
+	        #tmpStepCode := 0;
+	END_CASE;
+	
+	
+	#"knx-plc-to-DPT3".%X0 := #tmpStepCode.%X0;
+	#"knx-plc-to-DPT3".%X1 := #tmpStepCode.%X1;
+	#"knx-plc-to-DPT3".%X2 := #tmpStepCode.%X2;
+	
+	
+	
+	(*** c ***
+	
+	3.007 DPT_Control_Dimming 
+	c Increase or decrease the brightness. 
+	0 = Decrease 
+	1 = Increase 
+	
+	3.008 DPT_Control_Blinds 
+	c Move up or down. 
+	0 = Up 
+	1 = Down 
+	
+	*)
+	
+	// Daten aufbereiten
+	#"knx-plc-to-DPT3".%X3 := #data.Down_Increase;
+	
+END_FUNCTION
+
+FUNCTION_BLOCK "knx-sendenEmpfangen"
+{ S7_Optimized_Access := 'TRUE' }
+VERSION : 0.1
+   VAR_INPUT 
+      haupt : USInt;   // Hauptgruppe = 0..31
+      mittel : USInt;   // Mittelgruppe = 0..7
+      unter : USInt;   // Untergruppe = 0..255
+      Senden : Bool;   // Sendet #Wert auf den Bus
+      EmpfFrg : Bool;   // Gibt das beschreuben von #Wert VOM Bus frei
+   END_VAR
+
+   VAR_OUTPUT 
+      Senden_OK : Bool;   // Daten wurden auf den KNX-Bus übermittelt!
+      Empf_OK : Bool;   // Daten wurden vom KNX-Bus empfangen!
+   END_VAR
+
+   VAR_IN_OUT 
+      Wert : Variant;   // Zu sendender / Empfangender Wert!
+      KNX_Dat : "KNX_Data_Exchange";
+   END_VAR
+
+   VAR 
+      GruppenAddr : Word;
+      Gesendet : Bool;
+      SendeAnf : Bool;
+      R_TRIG_Senden {InstructionName := 'R_TRIG'; LibVersion := '1.0'} : R_TRIG;
+      statAPCI { S7_SetPoint := 'True'} : Byte;
+   END_VAR
+
+   VAR_TEMP 
+      tmp_bool : Bool;
+      tmp_DPT3 : "KNX_DPT3";
+      tmp_Byte : Byte;
+      tmp_sInt : SInt;
+      tmp_usInt : USInt;
+      tmp_Word : Word;
+      tmp_Int : Int;
+      tmp_UInt : UInt;
+      tmp_Dword : DWord;
+      tmp_Real : Real;
+      tmp_String : String [14];
+      i : Int;
+   END_VAR
+
+
+BEGIN
+	(*
+	
+	Der Baustein sendet bzw. empfängt ein KO vom Bus
+	
+	
+	Die SPS Variable wird als Variant an #Wert übergeben
+	Anhand des SPS-Datentyp wird das KNX-DPT "ermittelt"
+	
+	
+	
+	
+	Quelle:
+	"KNX_GruppeAddr" von kürbis85 und Matthias92
+	https://www.sps-forum.de/threads/knx-kommunkation-%C3%BCber-knxnet-ip-mit-siemens-s7-1500-s7-1200-tia-portal.93641/
+	
+	20.02.2024 van
+	DPT 3 implementiert
+	
+	02.06.2022 van
+	Empfangen DPT 16 String ergänzt
+	
+	17.10.2021 van
+	Code aufgeräumt
+	DPTs hinzugefügt
+	
+	03.10.2021 van
+	Baustein erstellt, auf Basic des Code von "KNX_GruppeAddr" von kürbis85 und Matthias92
+	
+	*)
+	
+	
+	
+	(*
+	
+	=========================
+	DPT - Datenpunkttyp
+	=========================
+	
+	
+	Die am häufigsten verwendeten Datenpunkttypen sind:
+	
+	1.yyy = boolesch, wie Schalten, Bewegen nach oben/unten, Schritt
+	2.yyy = 2 x boolesch, z. B. Schalten + Prioritätssteuerung
+	3.yyy = boolesch + vorzeichenloser 3-Bit-Wert, z. B. Auf-/Abdimmen
+	4.yyy = Zeichen (8-Bit)
+	5.yyy = vorzeichenloser 8-Bit-Wert, wie Dimm-Wert (0..100 %), Jalousienposition (0..100 %)
+	6.yyy = 8-Bit-2-Komplement, z. B. %
+	7.yyy = 2 x vorzeichenloser 8-Bit-Wert, z. B. Impulszähler
+	8.yyy = 2 x 8-Bit-2-Komplement, z. B. %
+	9.yyy = 16-Bit-Gleitkommazahl, z. B. Temperatur
+	10.yyy = Uhrzeit
+	11.yyy = Datum
+	12.yyy = 4 x vorzeichenloser 8-Bit-Wert,z. B. Impulszähler
+	13.yyy = 4 x 8-Bit-2-Komplement, z. B. Impulszähler
+	14.yyy = 32-Bit-Gleitkommazahl, z. B. Temperatur
+	15.yyy = Zugangskontrolle
+	16.yyy = String -> 14 Zeichen (14 x 8-Bit)
+	17.yyy = Szenennummer
+	18.yyy = Szenensteuerung
+	19.yyy = Uhrzeit + Datum
+	20.yyy = 8-Bit-Nummerierung,z. B. HLK-Modus („Automatik“, „Komfort“, „Stand-by“, „Sparen“, „Schutz“)
+	
+	https://support.knx.org/hc/de/articles/115001133744-Datenpunkttyp
+	
+	
+	DPT 1   1 Bit   0..1    
+	DPT 2   2 Bit   0..3    
+	DPT 3   4 Bit   0..15   
+	DPT 4   1 Byte, Char    1 ASCII-Zeichen Hinweis: Es sind nur ASCII-Zeichen ohne Steuerzeichen (mit Ausnahme von TAB, CR und LF) erlaubt.
+	DPT 5   1 Byte, Integer 0..255  
+	DPT 6   1 Byte, Integer -128..127   
+	DPT 7   2 Byte, Integer 0..65535    
+	DPT 8   2 Byte, Integer -32767..32767   
+	DPT 9   2 Byte, Float   -671088,64..670760,96   
+	DPT 10  3 Byte, Wochentag und Uhrzeit   "T.HH:MM:SS"    
+	DPT 11  3 Byte, Datum   "JJJJ-MM-TT"    
+	DPT 12  4 Byte, Integer 0..4294967295   
+	DPT 13  4 Byte, Integer -2147483647..2147483647 
+	DPT 14  4 Byte, Float   -∞..∞   Hinweis: Der Wertebereich hängt von der Anzahl der Nachkommastellen ab und ist daher nicht genau definierbar.
+	DPT 16  14 Byte, String 14 ASCII-Zeichen
+	
+	
+	*)
+	
+	
+	
+	
+	//Gruppenadresse zu einem Wort zusammenbauen!
+	#GruppenAddr := "knx-GAnr-to-GAword"(haupt := #haupt, mittel := #mittel, unter := #unter);
+	
+	
+	REGION Senden zum Bus
+	    
+	    //Daten senden!
+	    #R_TRIG_Senden(CLK := #Senden);
+	    IF #R_TRIG_Senden.Q THEN
+	        #SendeAnf := true;   //Speichern, dass die Daten gesendet sollen!
+	    END_IF;
+	    
+	    IF #SendeAnf AND NOT #KNX_Dat.Senden THEN   //Nur wenn KNX_Daten.Senden "false" ist, können Daten gesendet werden!
+	        
+	        
+	        CASE TypeOf(#Wert) OF
+	                
+	                // DPT 1   1 Bit   0..1 
+	                // 1.yyy = boolesch
+	            Bool:
+	                VariantGet(SRC := #Wert,
+	                           DST => #tmp_bool);
+	                
+	                #KNX_Dat.Send_Dat.GruppenAddr := #GruppenAddr;
+	                #KNX_Dat.Send_Dat.Laenge := 16#01;
+	                #KNX_Dat.Send_Dat.NPDU_ABCI := 16#00;
+	                
+	                IF #tmp_bool THEN
+	                    #KNX_Dat.Send_Dat.Daten[1] := 16#81;
+	                ELSE
+	                    #KNX_Dat.Send_Dat.Daten[1] := 16#80;
+	                END_IF;
+	                
+	                #KNX_Dat.Senden := true;
+	                #SendeAnf := false;
+	                #Gesendet := true;
+	                
+	     
+	             // DPT 3   4 Bit   0..15     
+	             // 3.yyy = boolesch + vorzeichenloser 3-Bit-Wert, z. B. Auf-/Abdimmen   
+	            "KNX_DPT3":
+	                
+	                VariantGet(SRC := #Wert,
+	                           DST => #tmp_DPT3);
+	                
+	                #KNX_Dat.Send_Dat.GruppenAddr := #GruppenAddr;
+	                #KNX_Dat.Send_Dat.Laenge := 16#01;
+	                #KNX_Dat.Send_Dat.NPDU_ABCI := 16#00;
+	                
+	                #tmp_Byte := "knx-plc-to-DPT3"(#tmp_DPT3);
+	                
+	                #KNX_Dat.Send_Dat.Daten[1] := #tmp_Byte;
+	                #KNX_Dat.Send_Dat.Daten[1].%X7 := true; // 16#8x
+	                
+	                #KNX_Dat.Senden := true;
+	                #SendeAnf := false;
+	                #Gesendet := true;
+	                
+	                
+	                
+	                //DPT 4   1 Byte, Char    1 ASCII-Zeichen Hinweis: Es sind nur ASCII-Zeichen ohne Steuerzeichen (mit Ausnahme von TAB, CR und LF) erlaubt.
+	                //DPT 5   1 Byte, Integer 0..255
+	                //DPT 6   1 Byte, Integer -128..127
+	                //4.yyy = Zeichen (8-Bit)
+	                //5.yyy = vorzeichenloser 8-Bit-#Wert, wie Dimm-#Wert (0..100 %), Jalousienposition (0..100 %)
+	                //6.yyy = 8-Bit-2-Komplement, z. B. %
+	            Byte:
+	                VariantGet(SRC := #Wert,
+	                           DST => #tmp_Byte);
+	                #KNX_Dat.Send_Dat.GruppenAddr := #GruppenAddr;
+	                #KNX_Dat.Send_Dat.Laenge := 16#02;
+	                #KNX_Dat.Send_Dat.NPDU_ABCI := 16#00;
+	                
+	                #KNX_Dat.Send_Dat.Daten[1] := 16#80;
+	                #KNX_Dat.Send_Dat.Daten[2] := #tmp_Byte;
+	                
+	                #KNX_Dat.Senden := true;
+	                #SendeAnf := false;
+	                #Gesendet := true;
+	                
+	                
+	                //DPT 5   1 Byte, Integer 0..255
+	                //5.yyy = vorzeichenloser 8-Bit-#Wert, wie Dimm-#Wert (0..100 %), Jalousienposition (0..100 %)
+	            USInt:
+	                VariantGet(SRC := #Wert,
+	                           DST => #tmp_usInt);
+	                #KNX_Dat.Send_Dat.GruppenAddr := #GruppenAddr;
+	                #KNX_Dat.Send_Dat.Laenge := 16#02;
+	                #KNX_Dat.Send_Dat.NPDU_ABCI := 16#00;
+	                
+	                #KNX_Dat.Send_Dat.Daten[1] := 16#80;
+	                #KNX_Dat.Send_Dat.Daten[2] := USINT_TO_BYTE(#tmp_usInt);
+	                
+	                #KNX_Dat.Senden := true;
+	                #SendeAnf := false;
+	                #Gesendet := true;
+	                
+	                
+	                //DPT 6   1 Byte, Integer -128..127
+	                //6.yyy = 8-Bit-2-Komplement, z. B. %
+	            SInt:
+	                VariantGet(SRC := #Wert,
+	                           DST => #tmp_sInt);
+	                #KNX_Dat.Send_Dat.GruppenAddr := #GruppenAddr;
+	                #KNX_Dat.Send_Dat.Laenge := 16#02;
+	                #KNX_Dat.Send_Dat.NPDU_ABCI := 16#00;
+	                
+	                #KNX_Dat.Send_Dat.Daten[1] := 16#80;
+	                #KNX_Dat.Send_Dat.Daten[2] := SINT_TO_BYTE(#tmp_sInt);
+	                
+	                #KNX_Dat.Senden := true;
+	                #SendeAnf := false;
+	                #Gesendet := true;
+	                
+	                
+	                // DPT 7   2 Byte, Integer 0..65535    
+	                // DPT 8   2 Byte, Integer -32767..32767
+	                // DPT 9   2 Byte, Float   -671088,64..670760,96
+	                // 7.yyy = 2 x vorzeichenloser 8-Bit-Wert, z. B. Impulszähler
+	                // 8.yyy = 2 x 8-Bit-2-Komplement, z. B. %
+	            Word:
+	                VariantGet(SRC := #Wert,
+	                           DST => #tmp_Word);
+	                #KNX_Dat.Send_Dat.GruppenAddr := #GruppenAddr;
+	                #KNX_Dat.Send_Dat.Laenge := 16#03;
+	                #KNX_Dat.Send_Dat.NPDU_ABCI := 16#00;
+	                
+	                #KNX_Dat.Send_Dat.Daten[1] := 16#80;
+	                #KNX_Dat.Send_Dat.Daten[2] := #tmp_Word.%B1;
+	                #KNX_Dat.Send_Dat.Daten[3] := #tmp_Word.%B0;
+	                
+	                #KNX_Dat.Senden := true;
+	                #SendeAnf := false;
+	                #Gesendet := true;
+	                
+	                
+	                // DPT 7   2 Byte, Integer 0..65535    
+	                // 7.yyy = 2 x vorzeichenloser 8-Bit-Wert, z. B. Impulszähler
+	            UInt:
+	                VariantGet(SRC := #Wert,
+	                           DST => #tmp_UInt);
+	                
+	                #KNX_Dat.Send_Dat.GruppenAddr := #GruppenAddr;
+	                #KNX_Dat.Send_Dat.Laenge := 16#03;
+	                #KNX_Dat.Send_Dat.NPDU_ABCI := 16#00;
+	                
+	                #KNX_Dat.Send_Dat.Daten[1] := 16#80;
+	                #KNX_Dat.Send_Dat.Daten[2] := #tmp_UInt.%B1;
+	                #KNX_Dat.Send_Dat.Daten[3] := #tmp_UInt.%B0;
+	                
+	                #KNX_Dat.Senden := true;
+	                #SendeAnf := false;
+	                #Gesendet := true;
+	                
+	                
+	                // DPT 8   2 Byte, Integer -32767..32767    
+	                // 8.yyy = 2 x 8-Bit-2-Komplement, z. B. %
+	            Int:
+	                VariantGet(SRC := #Wert,
+	                           DST => #tmp_Int);
+	                
+	                #KNX_Dat.Send_Dat.GruppenAddr := #GruppenAddr;
+	                #KNX_Dat.Send_Dat.Laenge := 16#03;
+	                #KNX_Dat.Send_Dat.NPDU_ABCI := 16#00;
+	                
+	                #KNX_Dat.Send_Dat.Daten[1] := 16#80;
+	                #KNX_Dat.Send_Dat.Daten[2] := #tmp_Int.%B1;
+	                #KNX_Dat.Send_Dat.Daten[3] := #tmp_Int.%B0;
+	                
+	                #KNX_Dat.Senden := true;
+	                #SendeAnf := false;
+	                
+	                
+	                //9.yyy = 16-Bit-Gleitkommazahl, z. B. Temperatur  
+	            Real:
+	                VariantGet(SRC := #Wert,
+	                           DST => #tmp_Real);
+	                #KNX_Dat.Send_Dat.GruppenAddr := #GruppenAddr;
+	                #KNX_Dat.Send_Dat.Laenge := 16#03;
+	                #KNX_Dat.Send_Dat.NPDU_ABCI := 16#00;
+	                
+	                
+	                #tmp_Word := "knx-real-to-DPT9"(#tmp_Real);
+	                
+	                #KNX_Dat.Send_Dat.Daten[1] := 16#80;
+	                #KNX_Dat.Send_Dat.Daten[2] := #tmp_Word.%B1;
+	                #KNX_Dat.Send_Dat.Daten[3] := #tmp_Word.%B0;
+	                
+	                #KNX_Dat.Senden := true;
+	                #SendeAnf := false;
+	                #Gesendet := true;
+	                
+	                
+	                //String   //DPT 16.xxx 
+	                //16.yyy = String -> 14 Zeichen (14 x 8-Bit)
+	            String:
+	                VariantGet(SRC := #Wert,
+	                           DST => #tmp_String);
+	                #KNX_Dat.Send_Dat.GruppenAddr := #GruppenAddr;
+	                #KNX_Dat.Send_Dat.Laenge := 16#0F;
+	                #KNX_Dat.Send_Dat.NPDU_ABCI := 16#00;
+	                #KNX_Dat.Send_Dat.Daten[1] := 16#80;
+	                #KNX_Dat.Send_Dat.Daten[2] := #tmp_String[1];
+	                #KNX_Dat.Send_Dat.Daten[3] := #tmp_String[2];
+	                #KNX_Dat.Send_Dat.Daten[4] := #tmp_String[3];
+	                #KNX_Dat.Send_Dat.Daten[5] := #tmp_String[4];
+	                #KNX_Dat.Send_Dat.Daten[6] := #tmp_String[5];
+	                #KNX_Dat.Send_Dat.Daten[7] := #tmp_String[6];
+	                #KNX_Dat.Send_Dat.Daten[8] := #tmp_String[7];
+	                #KNX_Dat.Send_Dat.Daten[9] := #tmp_String[8];
+	                #KNX_Dat.Send_Dat.Daten[10] := #tmp_String[9];
+	                #KNX_Dat.Send_Dat.Daten[11] := #tmp_String[10];
+	                #KNX_Dat.Send_Dat.Daten[12] := #tmp_String[11];
+	                #KNX_Dat.Send_Dat.Daten[13] := #tmp_String[12];
+	                #KNX_Dat.Send_Dat.Daten[14] := #tmp_String[13];
+	                #KNX_Dat.Send_Dat.Daten[15] := #tmp_String[14];
+	                #KNX_Dat.Senden := true;
+	                #SendeAnf := false;
+	                #Gesendet := true;
+	                
+	                
+	            ELSE  // Statement section ELSE
+	                ;
+	        END_CASE;
+	        
+	    END_IF;
+	    //Bit zurücksenden wenn der "Senden"-Input zurückgenommen wird!
+	    IF NOT #Senden THEN
+	        #Gesendet := false;
+	    END_IF;
+	    #Senden_OK := #Gesendet & NOT #KNX_Dat.Senden;
+	    
+	    
+	    
+	END_REGION
+	
+	
+	REGION Empfangen vom Bus
+	    
+	    #Empf_OK := false;
+	    
+	    //APCI extrahieren
+	    // GroupValueRead:     APCI = 0000b 
+	    // GroupValueResponse: APCI = 0001b
+	    // GroupValueWrite:    APCI = 0010b 
+	    #statAPCI.%X3 := #KNX_Dat.Empf_Dat.NPDU_ABCI.%X1;
+	    #statAPCI.%X2 := #KNX_Dat.Empf_Dat.NPDU_ABCI.%X0;
+	    #statAPCI.%X1 := #KNX_Dat.Empf_Dat.Daten[1].%X7;
+	    #statAPCI.%X0 := #KNX_Dat.Empf_Dat.Daten[1].%X6;
+	    
+	    
+	    IF #KNX_Dat.Empfangen
+	        AND #EmpfFrg
+	        AND (#KNX_Dat.Empf_Dat.GruppenAddr = #GruppenAddr)
+	        AND ((#statAPCI = 2#0000_0001) OR (#statAPCI = 2#0000_0010))    //Auf beides reagieren: GroupValueResponse oder GroupValueWrite
+	    THEN
+	        
+	        CASE TypeOf(#Wert) OF
+	                
+	                // 1.yyy = boolesch
+	            Bool:
+	                IF (#KNX_Dat.Empf_Dat.Laenge = 16#01)
+	                THEN
+	                    #KNX_Dat.Empfangen := false;
+	                    
+	                    // Daten aufbereiten
+	                    #tmp_bool := #KNX_Dat.Empf_Dat.Daten[1].%X0;
+	                    VariantPut(SRC := #tmp_bool,
+	                               DST := #Wert);
+	                    
+	                    #Empf_OK := TRUE;
+	                END_IF;
+	                
+	                
+	                // DPT 3   4 Bit   0..15     
+	                // 3.yyy = boolesch + vorzeichenloser 3-Bit-Wert, z. B. Auf-/Abdimmen   
+	            "KNX_DPT3":
+	                IF (#KNX_Dat.Empf_Dat.Laenge = 16#01)
+	                THEN
+	                    #KNX_Dat.Empfangen := false;
+	                    
+	                    // Daten aufbereiten
+	                    #tmp_DPT3:="knx-DPT3-to-plc"(data:=#KNX_Dat.Empf_Dat.Daten[1]);
+	                    
+	                    VariantPut(SRC := #tmp_DPT3,
+	                               DST := #Wert);
+	                    
+	                    #Empf_OK := TRUE;
+	                END_IF;
+	                
+	                
+	                
+	                //DPT 4   1 Byte, Char    1 ASCII-Zeichen Hinweis: Es sind nur ASCII-Zeichen ohne Steuerzeichen (mit Ausnahme von TAB, CR und LF) erlaubt.
+	                //DPT 5   1 Byte, Integer 0..255
+	                //DPT 6   1 Byte, Integer -128..127
+	                //4.yyy = Zeichen (8-Bit)
+	                //5.yyy = vorzeichenloser 8-Bit-#Wert, wie Dimm-#Wert (0..100 %), Jalousienposition (0..100 %)
+	                //6.yyy = 8-Bit-2-Komplement, z. B. %
+	            Byte:
+	                IF (#KNX_Dat.Empf_Dat.Laenge = 16#02)
+	                THEN
+	                    #KNX_Dat.Empfangen := false;
+	                    
+	                    // Daten aufbereiten
+	                    #tmp_Byte := #KNX_Dat.Empf_Dat.Daten[2];
+	                    
+	                    VariantPut(SRC := #tmp_Byte,
+	                               DST := #Wert);
+	                    
+	                    #Empf_OK := TRUE;
+	                END_IF;
+	                
+	                
+	                //DPT 5   1 Byte, Integer 0..255
+	                //5.yyy = vorzeichenloser 8-Bit-#Wert, wie Dimm-#Wert (0..100 %), Jalousienposition (0..100 %)
+	            SInt:
+	                IF (#KNX_Dat.Empf_Dat.Laenge = 16#02)
+	                THEN
+	                    #KNX_Dat.Empfangen := false;
+	                    
+	                    // Daten aufbereiten
+	                    #tmp_sInt := BYTE_TO_SINT(#KNX_Dat.Empf_Dat.Daten[2]);
+	                    VariantPut(SRC := #tmp_sInt,
+	                               DST := #Wert);
+	                    
+	                    #Empf_OK := TRUE;
+	                END_IF;
+	                
+	                
+	                //DPT 6   1 Byte, Integer -128..127
+	                //6.yyy = 8-Bit-2-Komplement, z. B. %  
+	            USInt:
+	                IF (#KNX_Dat.Empf_Dat.Laenge = 16#02)
+	                THEN
+	                    #KNX_Dat.Empfangen := false;
+	                    
+	                    // Daten aufbereiten
+	                    #tmp_usInt := BYTE_TO_USINT(#KNX_Dat.Empf_Dat.Daten[2]);
+	                    VariantPut(SRC := #tmp_usInt,
+	                               DST := #Wert);
+	                    
+	                    #Empf_OK := TRUE;
+	                END_IF;
+	                
+	                
+	                // DPT 7   2 Byte, Integer 0..65535    
+	                // DPT 8   2 Byte, Integer -32767..32767
+	                // DPT 9   2 Byte, Float   -671088,64..670760,96
+	                // 7.yyy = 2 x vorzeichenloser 8-Bit-Wert, z. B. Impulszähler
+	                // 8.yyy = 2 x 8-Bit-2-Komplement, z. B. %
+	            Word:
+	                IF (#KNX_Dat.Empf_Dat.Laenge = 16#03)
+	                THEN
+	                    #KNX_Dat.Empfangen := false;
+	                    
+	                    // Daten aufbereiten
+	                    #tmp_Word.%B1 := #KNX_Dat.Empf_Dat.Daten[2];
+	                    #tmp_Word.%B0 := #KNX_Dat.Empf_Dat.Daten[3];
+	                    VariantPut(SRC := #tmp_Word,
+	                               DST := #Wert);
+	                    
+	                    #Empf_OK := TRUE;
+	                END_IF;
+	                
+	                
+	                // DPT 7   2 Byte, Integer 0..65535    
+	                // 7.yyy = 2 x vorzeichenloser 8-Bit-Wert, z. B. Impulszähler
+	            UInt:
+	                IF (#KNX_Dat.Empf_Dat.Laenge = 16#03)
+	                THEN
+	                    #KNX_Dat.Empfangen := false;
+	                    
+	                    // Daten aufbereiten
+	                    #tmp_Int.%B1 := #KNX_Dat.Empf_Dat.Daten[2];
+	                    #tmp_Int.%B0 := #KNX_Dat.Empf_Dat.Daten[3];
+	                    VariantPut(SRC := #tmp_UInt,
+	                               DST := #Wert);
+	                    
+	                    #Empf_OK := TRUE;
+	                END_IF;
+	                
+	                
+	                // DPT 8   2 Byte, Integer -32767..32767    
+	                // 8.yyy = 2 x 8-Bit-2-Komplement, z. B. %  
+	            Int:
+	                IF (#KNX_Dat.Empf_Dat.Laenge = 16#03)
+	                THEN
+	                    #KNX_Dat.Empfangen := false;
+	                    
+	                    // Daten aufbereiten
+	                    #tmp_Int.%B1 := #KNX_Dat.Empf_Dat.Daten[2];
+	                    #tmp_Int.%B0 := #KNX_Dat.Empf_Dat.Daten[3];
+	                    VariantPut(SRC := #tmp_Int,
+	                               DST := #Wert);
+	                    
+	                    #Empf_OK := TRUE;
+	                END_IF;
+	                
+	                
+	                //9.yyy = 16-Bit-Gleitkommazahl, z. B. Temperatur
+	            Real:
+	                IF (#KNX_Dat.Empf_Dat.Laenge = 16#03)
+	                THEN
+	                    #KNX_Dat.Empfangen := false;
+	                    
+	                    
+	                    // Daten aufbereiten
+	                    #tmp_Word.%B0 := #KNX_Dat.Empf_Dat.Daten[3];
+	                    #tmp_Word.%B1 := #KNX_Dat.Empf_Dat.Daten[2];
+	                    #tmp_Real := "knx-DPT9-to-real"(#tmp_Word);
+	                    
+	                    VariantPut(SRC := #tmp_Real,
+	                               DST := #Wert);
+	                    
+	                    #Empf_OK := TRUE;
+	                END_IF;
+	                
+	                
+	             // DPT 16  14 Byte, String 14 ASCII-Zeichen
+	             // 16.yyy = String -> 14 Zeichen (14 x 8-Bit)
+	            String:
+	                IF (#KNX_Dat.Empf_Dat.Laenge = 16#0F)
+	                THEN
+	                    #KNX_Dat.Empfangen := false;
+	                    
+	                    // Daten aufbereiten
+	                    // erstes Zeichen in #KNX_Dat.Empf_Dat.Daten[2]
+	                    
+	                    #tmp_String := '              ';    // String init
+	                    
+	                    FOR #i := 1 TO 14 DO
+	                        IF #KNX_Dat.Empf_Dat.Daten[#i + 1] <> 0 THEN
+	                            #tmp_String[#i] := #KNX_Dat.Empf_Dat.Daten[#i + 1];
+	                        ELSE
+	                            #tmp_String[#i] := ' ';
+	                        END_IF;
+	                        
+	                    END_FOR;
+	                    
+	                    VariantPut(SRC := #tmp_String,
+	                               DST := #Wert);
+	                    
+	                    #Empf_OK := TRUE;
+	                END_IF;
+	                
+	            ELSE  // Statement section ELSE
+	                ;
+	        END_CASE;
+	    END_IF;
+	    
+	    
+	END_REGION
+	
+	
+	
+	
+	
+END_FUNCTION_BLOCK
+
